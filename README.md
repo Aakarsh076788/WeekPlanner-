@@ -2,7 +2,7 @@
 
 A private, account-scoped BTech routine tracker with three focused views:
 
-- **Today:** selected day’s session completion, completed study time, problem count, checklist, filters and an inline routine request field.
+- **Today:** live IST clock, current/upcoming/anytime work, visible problem checkboxes and clickable titles, plus a pending queue for unfinished sessions and problems. Older pending work appears here once, with Tomorrow, Day after, custom time, and Undo. Recent pending work appears first; longer queues expand on demand.
 - **Weekly plan:** dated sessions, weekly focus, exact study topics/problems, notes, checkboxes and copying an empty week with fresh progress. No metric blocks repeat here.
 - **Metrics:** weekly completion, planned versus completed work, coding progress, category breakdown, study/actual time, sleep logs and full-day streaks.
 
@@ -14,9 +14,12 @@ Without an OpenAI runtime connection, the UI explicitly says **Quick planner**. 
 
 - `Clear today and add Linked List from 7–8 PM`
 - `Tomorrow, Java arrays 6–7 PM with LC 724 and LC 121`
+- `Add Java arrays day after tomorrow 7–8 PM with LC 724`
 - `Add gym 5–7 AM every weekday this week`
 - `Move gym to tomorrow 6–7 AM`
 - `Clear 2026-10-28`
+
+The single Add session control offers Today / Tomorrow / Day after tomorrow shortcuts. The editor accepts any date; moving a session across weeks removes its original occurrence atomically and retains the same ID. Rescheduling checks overlaps and preserves solved problems and logged time.
 
 Use one session per line for multi-session plans. Dates, weekdays, ranges up to 31 days, repeat expansion, AM/PM and overnight times are handled. Ambiguous/missing times ask for detail. Quick planning is deterministic and is not presented as GPT.
 
@@ -24,11 +27,14 @@ For full GPT conversation in the same UI, configure `OPENAI_API_KEY` through Sit
 
 ## Data, privacy and ChatGPT connection
 
-ChatGPT sign-in and the Site access policy restrict access. D1 records are keyed by the authenticated Site user ID; endpoints reject anonymous requests. Browser focus/visibility refresh picks up other-device changes. Session completion and individual problem checkboxes are independent. Completed study estimates use logged minutes when available, otherwise checked sessions’ planned duration. Sleep belongs to bedtime date and supports overnight duration. Full-day streaks require every dated session complete; empty days break the streak.
+ChatGPT sign-in and the Site access policy restrict access. D1 records are keyed by the authenticated Site user ID; endpoints reject anonymous requests. Browser focus/visibility refresh picks up other-device changes. Session and problem checkboxes are independent controls. Completion metrics and streaks require both the session and all its problems checked; unchecked problems stay actionable even if the session checkbox is checked. Completed study estimates use logged minutes when available, otherwise checked sessions’ planned duration. Sleep belongs to bedtime date and supports overnight duration. Full-day streaks require every dated session and problem complete; empty days break the streak.
 
 The `/mcp` endpoint retains read, preview and save tools and adds `change_weekcraft_plan` and `undo_weekcraft_change`. ChatGPT can clear/replace sessions directly without opening the website. Read and preview first; only remove explicitly requested session IDs.
 
 ## Validation
+
+Run `npm test` for 24 shared-model regression checks covering the live clock, overnight boundaries, unfinished problem handling, cross-week moves, preserved links/progress, retry protection, overlap detection, Undo, arbitrary manual date edits, and day-after-tomorrow commands. This update also passed 11 local API persistence/isolation checks and desktop/375px phone interaction checks. The clock refreshes every 30 seconds while open and on focus; no background notification service is implied.
+
 
 18 model checks cover the exact Linked List request, dates/ranges/repeats, AM/PM clarification, multi-session requests, clear scope, moves, undo and retry protection. 17 local API checks cover persistence, atomic replacement, stale preview rejection, preserved work, account isolation, anonymous rejection, and connector clear/undo. Desktop and 390px phone checks cover direct planning, apply/undo, daily completion, navigation and separate Metrics. Type-check and production build pass. Temporary QA pages are excluded from deployment.
 
@@ -67,6 +73,7 @@ Copy `.env.example` to `.dev.vars` and configure your own `OPENAI_API_KEY` to en
 ### Useful commands
 
 ```bash
+pnpm test
 pnpm exec tsc --noEmit
 pnpm build
 pnpm db:generate

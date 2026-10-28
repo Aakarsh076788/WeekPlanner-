@@ -11,8 +11,9 @@ export function addDays(date:string,n:number){const d=new Date(date+'T12:00:00Z'
 export function today(){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())}
 export function monday(date:string){const d=new Date(date+'T12:00:00Z');return addDays(date,-((d.getUTCDay()+6)%7))}
 export function minutes(t:Pick<Task,'start'|'end'>){if(!t.start||!t.end)return 0;const [h,m]=t.start.split(':').map(Number),[hh,mm]=t.end.split(':').map(Number);return (hh*60+mm-h*60-m+1440)%1440}
-export function dayStats(tasks:Task[]){const done=tasks.filter(t=>t.done).length;return {total:tasks.length,done,percent:tasks.length?Math.round(done/tasks.length*100):0}}
-export function streak(state:Planner,date=today()){let n=0,d=date;const all=Object.values(state.weeks).flatMap(w=>w.tasks);const complete=(v:string)=>{const t=all.filter(x=>x.date===v);return t.length>0&&t.every(x=>x.done)};if(!complete(d))d=addDays(d,-1);while(complete(d)){n++;d=addDays(d,-1);if(n>3660)break}return n}
+export function taskComplete(task:Task){return task.done&&task.problems.every(p=>p.done)}
+export function dayStats(tasks:Task[]){const done=tasks.filter(taskComplete).length;return {total:tasks.length,done,percent:tasks.length?Math.round(done/tasks.length*100):0}}
+export function streak(state:Planner,date=today()){let n=0,d=date;const all=Object.values(state.weeks).flatMap(w=>w.tasks);const complete=(v:string)=>{const t=all.filter(x=>x.date===v);return t.length>0&&t.every(taskComplete)};if(!complete(d))d=addDays(d,-1);while(complete(d)){n++;d=addDays(d,-1);if(n>3660)break}return n}
 export function seedWeek(start:string):Week{
  const tasks:Task[]=[];
  const add=(day:number,category:Category,title:string,time:string,end:string,topic='',problems:Partial<Problem>[]=[],notes='')=>tasks.push({id:uid(),date:addDays(start,day),category,title,start:time,end,topic,problems:problems.map(p=>({id:uid(),title:p.title||'',url:p.url||'',done:false})),notes,done:false,actualMinutes:null});
@@ -36,7 +37,7 @@ export function applyOperation(state:Planner,op:Operation):Planner{
  if(op.type==='ensure')return next;
  if(op.type==='copy'){const source=next.weeks[op.from];if(week.tasks.length)throw new Error('This week already has sessions. Copy into an empty week.');if(!source)throw new Error('No previous plan to copy.');const offset=Math.round((new Date(op.week).getTime()-new Date(op.from).getTime())/86400000);week.focus=source.focus;week.tasks=source.tasks.map(t=>({...t,id:uid(),date:addDays(t.date,offset),done:false,actualMinutes:null,problems:t.problems.map(p=>({...p,id:uid(),done:false}))}));}
  if(op.type==='focus')week.focus=op.focus;
- if(op.type==='upsert'){const i=week.tasks.findIndex(t=>t.id===op.task.id);if(i<0)week.tasks.push(op.task);else week.tasks[i]=op.task;}
+ if(op.type==='upsert'){for(const w of Object.values(next.weeks))w.tasks=w.tasks.filter(t=>t.id!==op.task.id);week.tasks.push(op.task);}
  if(op.type==='remove')week.tasks=week.tasks.filter(t=>t.id!==op.id);
  if(op.type==='toggle'){const t=week.tasks.find(t=>t.id===op.id);if(t)t.done=op.done;}
  if(op.type==='problem'){const p=week.tasks.find(t=>t.id===op.id)?.problems.find(p=>p.id===op.problemId);if(p)p.done=op.done;}
