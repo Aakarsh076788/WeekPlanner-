@@ -1,0 +1,8 @@
+import {getChatGPTUser} from '../../chatgpt-auth';
+import {applyOperation,monday,type Operation} from '../../model';
+import {operationSchema} from '../../validation';
+import {readPlanner,updatePlanner} from '../../planner-store';
+export const dynamic='force-dynamic';
+function json(data:unknown,status=200){return Response.json(data,{status,headers:{'Cache-Control':'no-store'}})}
+export async function GET(){const user=await getChatGPTUser();if(!user)return json({error:'Please sign in to load your planner.'},401);try{return json(await readPlanner(user.userId))}catch(e){console.error('Planner load failed',e);return json({error:'Could not load your planner. Please retry.'},500)}}
+export async function POST(request:Request){const user=await getChatGPTUser();if(!user)return json({error:'Please sign in to save your planner.'},401);if(request.headers.get('origin')&&request.headers.get('origin')!==new URL(request.url).origin)return json({error:'Invalid origin'},403);try{const body=await request.text();if(body.length>60000)return json({error:'Session is too large.'},413);let input;try{input=JSON.parse(body)}catch{return json({error:'Invalid JSON.'},400)}const parsed=operationSchema.safeParse(input);if(!parsed.success)return json({error:'Check the session fields and problem links (http or https).'},400);const op=parsed.data as Operation;if(op.type==='upsert'&&monday(op.task.date)!==op.week)return json({error:'Choose a date within this week.'},400);const r=await updatePlanner(user.userId,state=>({state:applyOperation(state,op),result:null}));return json({state:r.state,revision:r.revision});}catch(e){return json({error:(e as Error).message||'Could not save. Please retry.'},400)}}

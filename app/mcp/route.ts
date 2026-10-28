@@ -1,0 +1,58 @@
+import {z} from 'zod';
+import {getChatGPTUser} from '../chatgpt-auth';
+import {today,addDays,CATEGORIES} from '../model';
+import {dateSchema} from '../validation';
+import {readPlanner,updatePlanner} from '../planner-store';
+import {proposalSchema,inspectProposal,applyProposal} from '../gpt-planning';
+import {changeSchema,previewChange,applyChange,undoChange} from '../direct-planning';
+export const dynamic='force-dynamic';
+const sessionInput={type:'object',additionalProperties:false,properties:{existing_session_id:{type:'string',description:'Only supply an ID returned by read_weekcraft_plan when updating or moving an existing session. Omit to create a new session.'},date:{type:'string',description:'Exact date, YYYY-MM-DD, in Asia/Kolkata.'},category:{type:'string',enum:[...CATEGORIES]},title:{type:'string',maxLength:160},start:{type:'string',description:'24-hour HH:mm, or empty for an untimed task.'},end:{type:'string',description:'24-hour HH:mm, or empty if unknown. Earlier than start means next day, e.g. overnight sleep.'},topic:{type:'string',maxLength:300,description:'Exact coding topic, study chapter or concrete goal.'},notes:{type:'string',maxLength:3000},problems:{type:'array',maxItems:30,items:{type:'object',additionalProperties:false,properties:{title:{type:'string',maxLength:300},url:{type:'string',description:'Optional http/https problem link; use empty if not known.'}},required:['title']}}},required:['date','category','title','start','end']};
+const sessionsInput={type:'array',minItems:1,maxItems:100,items:sessionInput};
+const tools=[
+ {name:'read_weekcraft_plan',description:'Read the user’s private Weekcraft routine and completion data for an inclusive date range (up to 62 days). Returns current date, timezone, existing session IDs, topics, problems and completion. Read before planning to avoid duplicate routines and conflicts. Dates/times are Asia/Kolkata. Resolve relative dates from today. Do not invent missing critical dates or times; ask the user when ambiguous.',inputSchema:{type:'object',additionalProperties:false,properties:{start_date:{type:'string',description:'YYYY-MM-DD. Defaults to today.'},end_date:{type:'string',description:'YYYY-MM-DD inclusive. Defaults to 6 days after start_date.'}},required:[]},annotations:{readOnlyHint:true,openWorldHint:false}},
+ {name:'preview_weekcraft_sessions',description:'Preview dated sessions before saving; does not change the plan. Expand repeats into one object per date. Returns proposed additions/updates, exact duplicates to skip, and overlaps including overnight sessions. Use existing_session_id for a requested edit instead of duplicating the session. Preserve existing topics, notes and problems on updates unless the user wants them changed. Ask the user about ambiguous times/dates and unresolved overlaps. Include exact coding topics and individual problems when provided.',inputSchema:{type:'object',additionalProperties:false,properties:{sessions:sessionsInput},required:['sessions']},annotations:{readOnlyHint:true,openWorldHint:false}},
+ {name:'save_weekcraft_sessions',description:'Create or update the user-requested dated routine in Weekcraft, across multiple weeks. Read the current plan and preview first. Adds up to 100 sessions atomically, skips exact duplicates and preserves completed status and actual time when updating. Existing problem completion is preserved for matching problem titles. Never deletes unrelated sessions. Only set allow_time_conflicts when the user has requested/accepted the intended overlap. Use the same unique request_id and identical sessions when retrying to avoid duplicates. Return counts and the tracker URL to the user.',inputSchema:{type:'object',additionalProperties:false,properties:{request_id:{type:'string',minLength:8,maxLength:100,description:'A new unique ID for this requested batch. Reuse unchanged when retrying.'},sessions:sessionsInput,allow_time_conflicts:{type:'boolean',default:false}},required:['request_id','sessions']},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:false}},
+ {name:'change_weekcraft_plan',description:'Preview or apply a user-requested plan change, including clearing/replacing a day or deleting selected sessions. Read the plan first and supply only existing session IDs. preview_only defaults true: preview removals and overlaps before applying. To save, use preview_only=false with the same proposed fields and a unique request_id. Deletions are reversible with undo_weekcraft_change; unrelated sessions are preserved. Do not open the browser to delete routine sessions. For clear today and add a session, include all today’s session IDs in remove_ids and the replacement in sessions.',inputSchema:{type:'object',additionalProperties:false,properties:{request_id:{type:'string',minLength:8,maxLength:100},preview_only:{type:'boolean',default:true},summary:{type:'string',maxLength:500},sessions:{...sessionsInput,minItems:0},remove_ids:{type:'array',maxItems:500,items:{type:'string'}},allow_time_conflicts:{type:'boolean',default:false}},required:['request_id','summary','sessions','remove_ids']},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:false}},
+ {name:'undo_weekcraft_change',description:'Undo the latest bulk plan change, including removed/replaced sessions. Use the undo_id from a saved change or read_weekcraft_plan. Refuses to overwrite newer edits in the affected weeks.',inputSchema:{type:'object',additionalProperties:false,properties:{undo_id:{type:'string'}},required:['undo_id']},annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:false,openWorldHint:false}}
+];
+const rangeSchema=z.object({start_date:dateSchema.optional(),end_date:dateSchema.optional()});
+const saveSchema=proposalSchema.extend({request_id:z.string().min(8).max(100),allow_time_conflicts:z.boolean().default(false)});
+const content=(value:unknown)=>({content:[{type:'text',text:JSON.stringify(value)}]});
+function rpc(id:unknown,result:unknown,status=200){return Response.json({jsonrpc:'2.0',id,result},{status,headers:{'Cache-Control':'no-store'}})}
+function rpcError(id:unknown,code:number,message:string,status=200){return Response.json({jsonrpc:'2.0',id,error:{code,message}},{status,headers:{'Cache-Control':'no-store'}})}
+export async function POST(request:Request){
+ let body:{jsonrpc?:string;id?:string|number|null;method?:string;params?:{name?:string;arguments?:unknown;protocolVersion?:string}};
+ try{const text=await request.text();if(text.length>200000)return rpcError(null,-32600,'Request is too large.',413);body=JSON.parse(text)}catch{return rpcError(null,-32700,'Invalid JSON.',400)}
+ if(!body||Array.isArray(body)||body.jsonrpc!=='2.0'||typeof body.method!=='string')return rpcError(null,-32600,'Invalid request.',400);
+ const id=body.id??null;
+ if(body.method==='server/discover')return rpc(id,{supportedVersions:['2026-07-28'],capabilities:{tools:{}}});
+ if(body.method==='initialize')return rpc(id,{protocolVersion:body.params?.protocolVersion??'2026-07-28',capabilities:{tools:{}},serverInfo:{name:'Weekcraft',version:'1.2.0'},instructions:'Weekcraft is the user’s private BTech routine tracker. Read the existing plan, resolve dates in Asia/Kolkata, expand repeats, preview and then save the user-requested sessions. Preserve completed work. Ask only for missing critical information or unresolved time overlaps.'});
+ if(body.method.startsWith('notifications/'))return new Response(null,{status:202});
+ if(body.method==='ping')return rpc(id,{});
+ if(body.method==='tools/list')return rpc(id,{tools});
+ if(body.method!=='tools/call')return rpcError(id,-32601,'Method not found.');
+ const user=await getChatGPTUser();if(!user)return rpc(id,{isError:true,content:[{type:'text',text:'Sign in with ChatGPT and connect Weekcraft to access your private plan.'}]},401);
+ try{
+  const args=body.params?.arguments??{};
+  if(body.params?.name==='read_weekcraft_plan'){
+   const input=rangeSchema.parse(args);const start=input.start_date??today(),end=input.end_date??addDays(start,6);const span=(Date.parse(end)-Date.parse(start))/86400000;if(span<0||span>61)throw new Error('Choose an inclusive range of 1–62 days.');
+   const {state,revision}=await readPlanner(user.userId);const sessions=Object.values(state.weeks).flatMap(w=>w.tasks).filter(t=>t.date>=start&&t.date<=end).sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
+   return rpc(id,content({today:today(),timezone:'Asia/Kolkata',revision,undo:state.lastChange?{id:state.lastChange.id,label:state.lastChange.label}:null,start_date:start,end_date:end,categories:CATEGORIES,sessions,weekly_focus:Object.entries(state.weeks).filter(([w])=>w<=end&&addDays(w,6)>=start).map(([week,v])=>({week,focus:v.focus})),tracker_url:new URL('/',request.url).href}));
+  }
+  if(body.params?.name==='preview_weekcraft_sessions'){
+   const input=proposalSchema.parse(args),{state}=await readPlanner(user.userId);const p=inspectProposal(state,input.sessions);
+   return rpc(id,content({timezone:'Asia/Kolkata',will_add:p.candidates.filter(c=>!c.old).length,will_update:p.candidates.filter(c=>c.old).length,duplicates_to_skip:p.duplicates,conflicts:p.conflicts,sessions:p.candidates.map(c=>({action:c.old?'update':'add',...c.task})),can_save_without_overlaps:p.conflicts.length===0}));
+  }
+  if(body.params?.name==='save_weekcraft_sessions'){
+   const input=saveSchema.parse(args);const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(input.sessions)));const fingerprint=Array.from(new Uint8Array(digest),n=>n.toString(16).padStart(2,'0')).join('');const saved=await updatePlanner(user.userId,state=>applyProposal(state,input.sessions,input.request_id,input.allow_time_conflicts,fingerprint));
+   return rpc(id,content({...saved.result,timezone:'Asia/Kolkata',tracker_url:new URL('/',request.url).href,message:'Saved to your private Weekcraft planner. Refresh or return to the tracker to see the sessions.'}));
+  }
+  if(body.params?.name==='change_weekcraft_plan'){
+   const input=changeSchema.and(z.object({request_id:z.string().min(8).max(100),preview_only:z.boolean().default(true),allow_time_conflicts:z.boolean().default(false)})).parse(args);const plan=changeSchema.parse(input);
+   if(input.preview_only){const {state}=await readPlanner(user.userId);const p=previewChange(state,plan);return rpc(id,content({will_add:p.candidates.filter(c=>!c.old).length,will_update:p.candidates.filter(c=>c.old).length,will_remove:p.removed.length,removed_sessions:p.removed.map(t=>({id:t.id,title:t.title,date:t.date,start:t.start,end:t.end})),conflicts:p.conflicts,duplicates_to_skip:p.duplicates}));}
+   const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(plan)));const fingerprint=Array.from(new Uint8Array(hash),n=>n.toString(16).padStart(2,'0')).join('');const saved=await updatePlanner(user.userId,state=>applyChange(state,plan,input.request_id,input.allow_time_conflicts,fingerprint));return rpc(id,content({...saved.result,undo_id:saved.result.undoId,tracker_url:new URL('/',request.url).href}));
+  }
+  if(body.params?.name==='undo_weekcraft_change'){const input=z.object({undo_id:z.string().min(1).max(80)}).parse(args);await updatePlanner(user.userId,state=>({state:undoChange(state,input.undo_id),result:null}));return rpc(id,content({restored:true,tracker_url:new URL('/',request.url).href}));}
+  return rpcError(id,-32602,'Unknown tool.');
+ }catch(e){const message=e instanceof z.ZodError?e.issues.map(i=>`${i.path.join('.')}: ${i.message}`).join('; '):(e as Error).message;return rpc(id,{isError:true,content:[{type:'text',text:message||'Could not complete the request. Retry with the same request_id.'}]})}
+}
