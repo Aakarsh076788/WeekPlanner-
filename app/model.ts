@@ -4,7 +4,8 @@ export type Problem = {id:string;title:string;url:string;done:boolean};
 export type Task = {id:string;date:string;category:Category;title:string;start:string;end:string;topic:string;problems:Problem[];notes:string;done:boolean;actualMinutes:number|null};
 export type Week = {focus:string;tasks:Task[]};
 export type PlanResult = {added:number;updated:number;skipped:number;sessionIds:string[];removed?:number;undoId?:string};
-export type Planner = {weeks:Record<string,Week>;lastChange?:{id:string;label:string;beforeWeeks:Record<string,Week|null>;afterWeeks:Record<string,Week|null>};planRequests?:Record<string,{fingerprint:string;result:PlanResult}>};
+export type SchedulingPreferences={earliest:string;latest:string;bufferMinutes:number;dailyStudyLimit:number};
+export type Planner = {weeks:Record<string,Week>;schedulingPreferences?:SchedulingPreferences;lastChange?:{id:string;label:string;beforeWeeks:Record<string,Week|null>;afterWeeks:Record<string,Week|null>};planRequests?:Record<string,{fingerprint:string;result:PlanResult}>};
 export type Operation = {type:'ensure';week:string}|{type:'upsert';week:string;task:Task}|{type:'toggle';week:string;id:string;done:boolean}|{type:'problem';week:string;id:string;problemId:string;done:boolean}|{type:'remove';week:string;id:string}|{type:'copy';week:string;from:string}|{type:'focus';week:string;focus:string};
 export const uid=()=>{if(crypto.randomUUID)return crypto.randomUUID();const b=crypto.getRandomValues(new Uint8Array(16));return Array.from(b,n=>n.toString(16).padStart(2,'0')).join('')};
 export function addDays(date:string,n:number){const d=new Date(date+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10)}

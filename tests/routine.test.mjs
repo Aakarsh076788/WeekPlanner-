@@ -10,7 +10,7 @@ const temp = await mkdtemp(path.join(root, 'node_modules/.weekcraft-tests-'));
 let passed = 0;
 const check = (name, test) => {test(); passed++; console.log(`✓ ${name}`);};
 try {
-  for (const name of ['model', 'validation', 'gpt-planning', 'direct-planning', 'daily-work']) {
+  for (const name of ['model', 'validation', 'gpt-planning', 'direct-planning', 'daily-work', 'scheduling', 'routine-agent']) {
     const source = await readFile(path.join(root, `app/${name}.ts`), 'utf8');
     const {outputText} = ts.transpileModule(source, {compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext}});
     await writeFile(path.join(temp, `${name}.mjs`), outputText.replace(/from '(\.\/[^']+)'/g, "from '$1.mjs'"));
@@ -53,5 +53,42 @@ try {
   check('Day-after-tomorrow commands use two days, clean titles, and retain problems',()=>{const result=quickPlan('Add Java arrays day after tomorrow 7–8 PM with LC 724',state,task.date);assert.equal(result.sessions[0].date,'2026-10-30');assert.equal(result.sessions[0].title,'Java arrays');assert.equal(result.sessions[0].problems[0].title,'LC 724')});
   check('Manual end-only and zero-duration sessions are rejected',()=>{assert.equal(taskSchema.safeParse({...task,start:''}).success,false);assert.equal(taskSchema.safeParse({...task,end:task.start}).success,false)});
   check('Unsafe problem link schemes are rejected',()=>assert.equal(taskSchema.safeParse({...task,problems:[{...task.problems[0],url:'javascript:alert(1)'}]}).success,false));
+  const {findFreeSlots,defaultPreferences,preferencesSchema}=await load('scheduling');
+  const {runRoutineAgent,scheduleReply,agentTools}=await load('routine-agent');
+  const pending={...task,date:'2026-10-27'};
+  const college={...task,id:'college',date:'2026-10-28',category:'College',title:'College',start:'08:15',end:'16:00',problems:[]};
+  const schedule={weeks:{'2026-10-26':{focus:'DSA',tasks:[pending,college]}}};
+  const afternoon=new Date('2026-10-28T16:00:00+05:30');
+  const free=findFreeSlots(schedule,{sessionId:task.id,days:1},afternoon);
+  check('Slot suggestions leave college commute time and never suggest the past',()=>{assert.ok(free.length);assert.ok(free.every(s=>s.start>='16:30'&&s.end<='22:30'))});
+  check('Suggested moves are conflict-free and leave data unchanged',()=>{for(const s of free)assert.equal(previewChange(schedule,s.plan).conflicts.length,0);assert.equal(schedule.weeks['2026-10-26'].tasks[0].date,'2026-10-27')});
+  check('Suggestions keep session and full problem details',()=>{assert.equal(free[0].plan.sessions[0].existing_session_id,task.id);assert.deepEqual(free[0].plan.sessions[0].problems,task.problems.map(({title,url})=>({title,url})))});
+  const busyDay={...schedule,schedulingPreferences:{...defaultPreferences,dailyStudyLimit:60},weeks:{'2026-10-26':{focus:'',tasks:[pending,{...task,id:'other-study',start:'20:00',end:'21:00'}]}}};
+  check('Study limit is enforced instead of overbooking the day',()=>assert.equal(findFreeSlots(busyDay,{sessionId:task.id,days:1},afternoon).length,0));
+  check('No fitting full-duration slot returns no suggestions',()=>assert.equal(findFreeSlots({...schedule,schedulingPreferences:{...defaultPreferences,earliest:'20:00',latest:'20:30'}},{sessionId:task.id,days:1},afternoon).length,0));
+  const sleep={...college,id:'sleep',category:'Sleep',date:'2026-10-27',start:'23:30',end:'09:00',title:'Sleep'};
+  check('Overnight sleep blocks the following morning with a buffer',()=>{const slots=findFreeSlots({weeks:{'2026-10-26':{focus:'',tasks:[pending,sleep]}},schedulingPreferences:{...defaultPreferences,earliest:'08:00',latest:'11:00'}},{sessionId:task.id,days:1,durationMinutes:30},new Date('2026-10-28T08:00:00+05:30'));assert.ok(slots.length);assert.ok(slots.every(s=>s.start>='09:15'))});
+  check('Sleep is protected instead of guessed as a short catch-up task',()=>assert.throws(()=>findFreeSlots({weeks:{'2026-10-26':{focus:'',tasks:[sleep]}}},{sessionId:sleep.id},afternoon),/bedtime and wake time/));
+  check('Unknown session IDs cannot be used to get suggestions',()=>assert.throws(()=>findFreeSlots(schedule,{sessionId:'foreign'},afternoon),/no longer exists/));
+  check('Invalid planning windows are rejected',()=>assert.equal(preferencesSchema.safeParse({...defaultPreferences,earliest:'23:00',latest:'08:00'}).success,false));
+  check('Suggestions on otherwise unplanned days disclose missing commitments',()=>assert.ok(findFreeSlots(state,{sessionId:task.id,fromDate:'2026-11-02',days:1},afternoon)[0].assumptions.some(a=>a.includes('No other sessions'))));
+  check('Fallback does not pretend it is an AI model',()=>{const reply=scheduleReply(schedule,{message:'Review my week',referenceDate:task.date},afternoon);assert.equal(reply.engine,'schedule');assert.equal(reply.plan,null)});
+  check('Fallback asks which pending session instead of moving one silently',()=>{const reply=scheduleReply(schedule,{message:'Find time for missed work',referenceDate:task.date},afternoon);assert.equal(reply.chooseTask,true);assert.equal(reply.plan,null)});
+  check('Fallback preserves normal direct planning commands',()=>assert.equal(scheduleReply(schedule,{message:'Add Java tomorrow 7–8 PM',referenceDate:task.date},afternoon).plan.sessions[0].date,'2026-10-29'));
+  check('Agent tool schemas are strict and contain no direct write tool',()=>{assert.ok(agentTools.every(t=>t.strict&&t.parameters.additionalProperties===false));assert.ok(!agentTools.some(t=>/save|apply|delete/.test(t.name)))});
+  const beforeAgent=structuredClone(schedule);let calls=0;
+  const agent=await runRoutineAgent(schedule,{message:'When should I do my missed Linked List work?',referenceDate:task.date,sessionId:task.id},async body=>{calls++;assert.equal(body.store,false);if(calls===1)return{output:[{type:'function_call',name:'find_free_slots',call_id:'slots-1',arguments:JSON.stringify({session_id:task.id,from_date:task.date,days:7,duration_minutes:60})}]};assert.ok(body.input.some(i=>i.type==='function_call_output'&&JSON.parse(i.output).slots.length));return{output:[{type:'message',content:[{type:'output_text',text:'These times fit around your saved commitments. Choose one to review.'}]}]};},'test-model',afternoon);
+  check('Real agent loop executes free-slot tool and returns contextual options',()=>{assert.equal(calls,2);assert.equal(agent.engine,'gpt');assert.ok(agent.suggestions.length);assert.ok(agent.usedTools.includes('Checked free slots'))});
+  check('Agent read/tool loop cannot mutate the routine',()=>assert.deepEqual(schedule,beforeAgent));
+  let stagedCalls=0;
+  const staged=await runRoutineAgent(schedule,{message:'Move Linked List tomorrow to 7–8 PM',referenceDate:task.date},async()=>{stagedCalls++;return stagedCalls===1?{output:[{type:'function_call',name:'propose_change',call_id:'change-1',arguments:JSON.stringify(movePlan(pending,'2026-10-29'))}]}:{output:[{type:'message',content:[{type:'output_text',text:'The move is ready to review. Click Apply to save.'}]}]};},'test-model',afternoon);
+  check('Agent stages a preview without saving it',()=>{assert.equal(staged.plan.sessions[0].date,'2026-10-29');assert.deepEqual(schedule,beforeAgent)});
+  let preserveCalls=0;const preserved=await runRoutineAgent(schedule,{message:'Move this session',referenceDate:task.date,sessionId:task.id},async()=>{preserveCalls++;return preserveCalls===1?{output:[{type:'function_call',name:'propose_change',call_id:'preserve',arguments:JSON.stringify({summary:'Move with saved details',remove_ids:[],sessions:[{...movePlan(pending,'2026-10-29').sessions[0],topic:null,notes:null,problems:null}]})}]}:{output:[{type:'message',content:[{type:'output_text',text:'Review the move.'}]}]};},'test-model',afternoon);
+  check('Null-preserving agent moves keep every original problem link and note',()=>{assert.equal(preserved.plan.sessions[0].notes,pending.notes);assert.equal(preserved.plan.sessions[0].topic,pending.topic);assert.deepEqual(preserved.plan.sessions[0].problems,pending.problems.map(({title,url})=>({title,url})))});
+  let invalidCalls=0;
+  await runRoutineAgent(schedule,{message:'Find an opening',referenceDate:task.date},async body=>{invalidCalls++;if(invalidCalls===1)return{output:[{type:'function_call',name:'find_free_slots',call_id:'bad-1',arguments:JSON.stringify({session_id:'foreign',from_date:null,days:7,duration_minutes:null})}]};assert.ok(JSON.parse(body.input.find(i=>i.type==='function_call_output').output).error);return{output:[{type:'message',content:[{type:'output_text',text:'Please choose a session from your planner.'}]}]};},'test-model',afternoon);
+  check('Invalid tool calls return an error without exposing another account',()=>assert.equal(invalidCalls,2));
+  let bounded=0;await assert.rejects(()=>runRoutineAgent(schedule,{message:'Loop',referenceDate:task.date},async()=>{bounded++;return{output:[{type:'function_call',name:'review_progress',call_id:'loop-'+bounded,arguments:'{}'}]}},'test-model',afternoon),/too many steps/);
+  check('Agent request loop is bounded to four model calls',()=>assert.equal(bounded,4));
   console.log(`${passed} checks passed.`);
 } finally {await rm(temp,{recursive:true,force:true});}
